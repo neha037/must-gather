@@ -22,6 +22,16 @@ PERF_DATA_DIR=""
 _PERF_START_EPOCH=""
 _PERF_MONITOR_PID=""
 _PERF_TRACKER_PIDS=()
+_PERF_INTERRUPTED=false
+_PERF_REPORT_GENERATED=false
+
+# _perf_handle_signal: Mark the run as interrupted and exit.
+# Registered as TERM/INT trap so the EXIT trap can detect signal-driven
+# termination and generate a partial report before cleaning up.
+_perf_handle_signal() {
+    _PERF_INTERRUPTED=true
+    exit 1
+}
 
 # _perf_cleanup: Clean up the background monitor and temp data directory.
 # Registered as an EXIT trap so resources are released even on unexpected
@@ -32,6 +42,9 @@ _perf_cleanup() {
         kill "$_PERF_MONITOR_PID" 2>/dev/null || true
         wait "$_PERF_MONITOR_PID" 2>/dev/null || true
         _PERF_MONITOR_PID=""
+    fi
+    if [[ "${_PERF_REPORT_GENERATED}" != "true" && -n "${PERF_DATA_DIR:-}" && -d "$PERF_DATA_DIR" ]]; then
+        perf_generate_report 2>/dev/null || true
     fi
     if [[ -n "${PERF_DATA_DIR:-}" && -d "$PERF_DATA_DIR" ]]; then
         rm -rf "$PERF_DATA_DIR"
@@ -46,8 +59,10 @@ perf_init() {
     _PERF_START_EPOCH=$(date +%s)
     PERF_DATA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/must-gather-perf.XXXXXX")
     touch "$PERF_DATA_DIR/scripts.csv"
+    touch "$PERF_DATA_DIR/started.csv"
     touch "$PERF_DATA_DIR/samples.csv"
     trap '_perf_cleanup' EXIT
+    trap '_perf_handle_signal' TERM INT
     echo "PERF: Initialised performance tracking (data dir: $PERF_DATA_DIR)"
 }
 
@@ -142,6 +157,7 @@ perf_track_script() {
 
     local start_time end_time duration exit_code
     start_time=$(date +%s)
+    echo "${label},${start_time}" >> "$PERF_DATA_DIR/started.csv"
 
     # Save and restore errexit so we don't leak set -e into the caller
     local prev_errexit=0
@@ -177,6 +193,7 @@ perf_track_pid() {
     local pid="$2"
     local start_time
     start_time=$(date +%s)
+    echo "${label},${start_time}" >> "$PERF_DATA_DIR/started.csv"
 
     (
         while kill -0 "$pid" 2>/dev/null; do
@@ -218,6 +235,8 @@ _perf_bytes_to_mib() {
 perf_generate_report() {
     if [[ "$_PERF_ENABLED" != "true" ]]; then return 0; fi
 
+    _PERF_REPORT_GENERATED=true
+
     local base_path="${BASE_COLLECTION_PATH:-/must-gather}"
     local report_file="${base_path}/performance-report.txt"
     local end_epoch
@@ -228,6 +247,11 @@ perf_generate_report() {
         echo "===== must-gather Performance Report ====="
         echo "Generated: $(date --iso-8601=seconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
         echo ""
+
+        if [[ "$_PERF_INTERRUPTED" == "true" ]]; then
+            echo "WARNING: Run was interrupted (timeout or signal) -- data below is partial."
+            echo ""
+        fi
 
         # --- Overall timing ---
         echo "--- Overall ---"
@@ -244,6 +268,24 @@ perf_generate_report() {
             echo "(no per-script timing data collected)"
         fi
         echo ""
+
+        # --- Still running at interruption (started but not completed) ---
+        if [[ "$_PERF_INTERRUPTED" == "true" && -s "$PERF_DATA_DIR/started.csv" ]]; then
+            local still_running
+            still_running=$(awk -F',' -v sf="$PERF_DATA_DIR/scripts.csv" '
+                FILENAME == sf { completed[$1]=1; next }
+                !($1 in completed) { print $1","$2 }
+            ' "$PERF_DATA_DIR/scripts.csv" "$PERF_DATA_DIR/started.csv" 2>/dev/null)
+
+            if [[ -n "$still_running" ]]; then
+                echo "--- Scripts Still Running at Interruption ---"
+                while IFS=',' read -r label start_ts; do
+                    local elapsed=$(( end_epoch - start_ts ))
+                    printf "%-45s  running for %s+ (%ds+)\n" "$label" "$(_perf_format_duration "$elapsed")" "$elapsed"
+                done <<< "$still_running"
+                echo ""
+            fi
+        fi
 
         # --- Resource usage ---
         echo "--- Resource Usage ---"

@@ -23,17 +23,19 @@ run_perf() {
 # perf_init tests
 # =============================================================================
 
-@test "perf_init creates data directory and samples/scripts files" {
+@test "perf_init creates data directory and samples/scripts/started files" {
 	run_perf '
 		perf_init
 		[[ -d "$PERF_DATA_DIR" ]] && echo "DIR_EXISTS"
 		[[ -f "$PERF_DATA_DIR/scripts.csv" ]] && echo "SCRIPTS_CSV_EXISTS"
+		[[ -f "$PERF_DATA_DIR/started.csv" ]] && echo "STARTED_CSV_EXISTS"
 		[[ -f "$PERF_DATA_DIR/samples.csv" ]] && echo "SAMPLES_CSV_EXISTS"
 	'
 
 	assert_success
 	assert_output --partial "DIR_EXISTS"
 	assert_output --partial "SCRIPTS_CSV_EXISTS"
+	assert_output --partial "STARTED_CSV_EXISTS"
 	assert_output --partial "SAMPLES_CSV_EXISTS"
 }
 
@@ -158,6 +160,17 @@ run_perf() {
 	assert_output --partial "executed anyway"
 }
 
+@test "perf_track_script records entry in started.csv" {
+	run_perf '
+		perf_init
+		perf_track_script "my_script" true
+		echo "STARTED=$(cat "$PERF_DATA_DIR/started.csv")"
+	'
+
+	assert_success
+	assert_output --regexp "STARTED=my_script,[0-9]+"
+}
+
 # =============================================================================
 # perf_track_pid tests
 # =============================================================================
@@ -221,6 +234,20 @@ run_perf() {
 
 	assert_success
 	assert_output --partial "NO_CRASH"
+}
+
+@test "perf_track_pid records entry in started.csv" {
+	run_perf '
+		perf_init
+		sleep 1 &
+		perf_track_pid "bg_tracked" $!
+		wait $! 2>/dev/null || true
+		sleep 2
+		echo "STARTED=$(cat "$PERF_DATA_DIR/started.csv")"
+	'
+
+	assert_success
+	assert_output --regexp "STARTED=bg_tracked,[0-9]+"
 }
 
 # =============================================================================
@@ -518,6 +545,115 @@ run_perf() {
 }
 
 # =============================================================================
+# Signal handling / interrupted report tests
+# =============================================================================
+
+@test "SIGTERM generates partial report with interrupted warning" {
+	# Run a script that initialises perf, starts a long-running tracked
+	# command, then receives SIGTERM.  The EXIT trap should produce a
+	# partial report containing the warning banner.
+	local wrapper="$TEST_TMPDIR/sigterm_test.sh"
+	cat > "$wrapper" <<'SCRIPT'
+#!/bin/bash
+set +o nounset; set +o errexit; set +o pipefail
+export BASE_COLLECTION_PATH="__BASE__"
+source "__SCRIPT_DIR__/perf_utils.sh"
+perf_init
+perf_track_script "completed_script" true
+perf_track_script "long_script" sleep 300 &
+pids+=($!)
+echo "READY"
+wait "${pids[@]}"
+SCRIPT
+	sed -i "s|__BASE__|$TEST_TMPDIR/must-gather|g" "$wrapper"
+	sed -i "s|__SCRIPT_DIR__|$SCRIPT_DIR|g" "$wrapper"
+	chmod +x "$wrapper"
+
+	# Run in its own session so we can kill the entire process tree
+	setsid bash "$wrapper" > "$TEST_TMPDIR/out.txt" 2>&1 &
+	local wrapper_pid=$!
+
+	local tries=0
+	while ! grep -q "READY" "$TEST_TMPDIR/out.txt" 2>/dev/null; do
+		sleep 0.2
+		tries=$((tries + 1))
+		if (( tries > 50 )); then
+			kill -- -"$wrapper_pid" 2>/dev/null || true
+			fail "Wrapper script never became ready"
+		fi
+	done
+
+	# SIGTERM the wrapper; the EXIT trap generates a partial report
+	kill -TERM "$wrapper_pid"
+	wait "$wrapper_pid" 2>/dev/null || true
+
+	# Clean up the entire session (orphaned sleep, tracker subshells)
+	kill -- -"$wrapper_pid" 2>/dev/null || true
+
+	local report="$TEST_TMPDIR/must-gather/performance-report.txt"
+	[ -f "$report" ]
+
+	run cat "$report"
+	assert_output --partial "WARNING: Run was interrupted (timeout or signal) -- data below is partial."
+	assert_output --partial "must-gather Performance Report"
+	assert_output --partial "completed_script"
+	assert_output --partial "--- Scripts Still Running at Interruption ---"
+	assert_output --partial "long_script"
+}
+
+@test "normal exit does not show interrupted warning in report" {
+	run_perf '
+		perf_init
+		perf_track_script "normal_cmd" true
+		perf_generate_report
+		cat "$BASE_COLLECTION_PATH/performance-report.txt"
+	'
+
+	assert_success
+	assert_output --partial "must-gather Performance Report"
+	assert_output --partial "normal_cmd"
+	refute_output --partial "WARNING: Run was interrupted"
+	refute_output --partial "Scripts Still Running at Interruption"
+}
+
+@test "cleanup is idempotent when report already generated" {
+	run_perf '
+		perf_init
+		perf_track_script "some_cmd" true
+		perf_generate_report
+		# Trigger cleanup explicitly (simulates EXIT trap firing after report)
+		_perf_cleanup
+		echo "NO_CRASH"
+		cat "$BASE_COLLECTION_PATH/performance-report.txt"
+	'
+
+	assert_success
+	assert_output --partial "NO_CRASH"
+	assert_output --partial "must-gather Performance Report"
+	assert_output --partial "some_cmd"
+	refute_output --partial "WARNING: Run was interrupted"
+}
+
+@test "report contains interrupted warning when _PERF_INTERRUPTED is true" {
+	run_perf '
+		perf_init
+		perf_track_script "done_cmd" true
+		# Simulate a script that started but never completed
+		echo "stuck_cmd,$(date +%s)" >> "$PERF_DATA_DIR/started.csv"
+		_PERF_INTERRUPTED=true
+		perf_generate_report
+		cat "$BASE_COLLECTION_PATH/performance-report.txt"
+	'
+
+	assert_success
+	assert_output --partial "WARNING: Run was interrupted (timeout or signal) -- data below is partial."
+	assert_output --partial "done_cmd"
+	assert_output --partial "--- Scripts Still Running at Interruption ---"
+	assert_output --partial "stuck_cmd"
+	assert_output --partial "running for"
+}
+
+# =============================================================================
 # End-to-end integration test
 # =============================================================================
 
@@ -548,4 +684,5 @@ run_perf() {
 	assert_output --partial "CPU Load"
 	assert_output --partial "Memory Usage"
 	assert_output --partial "PERF: Performance report written to"
+	refute_output --partial "WARNING: Run was interrupted"
 }
