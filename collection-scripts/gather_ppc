@@ -144,8 +144,8 @@ EOF
       echo "Failed to collect performance data from node ${line} due to pod scheduling failure." >> ${NODES_PATH}/skipped_nodes.txt
   done
 
-  COLLECTABLE_NODES=()
-  NODE_PIDS=()
+  NODE_UNITS=(kubelet)
+  ALL_NODE_PIDS=()
   for line in $(oc get pod -o=custom-columns=NODE:.spec.nodeName,NAME:.metadata.name --no-headers -l name=perf-node-gather-daemonset --field-selector=status.phase=Running -n $NAMESPACE)
   do
       node=$(echo $line | awk -F ' ' '{print $1}')
@@ -153,27 +153,16 @@ EOF
       NODE_PATH=${NODES_PATH}/$node
       mkdir -p "${NODE_PATH}"
 
-      COLLECTABLE_NODES+=($node)
-
-      # Run per node data collection in parallel
       timeout -k 1m 5m /usr/bin/gather_ppc_single_node "${pod}" "${NAMESPACE}" "${node}" "${NODE_PATH}" &
-      NODE_PIDS+=($!)
-  done
-  wait "${NODE_PIDS[@]}"
+      ALL_NODE_PIDS+=($!)
 
-  # Collect journal logs for specified units for all nodes
-  NODE_UNITS=(kubelet)
-  ADM_PIDS=()
-  for NODE in ${COLLECTABLE_NODES[@]}; do
-      NODE_PATH=${NODES_PATH}/$NODE
-      mkdir -p ${NODE_PATH}
       for UNIT in ${NODE_UNITS[@]}; do
-          echo "Collecting ${UNIT} logs for node ${NODE}"
-          timeout -k 5m 30m bash -c "oc adm node-logs \"${node_log_collection_args:---since=-8h}\" $NODE -u $UNIT | gzip" > ${NODE_PATH}/${NODE}_logs_$UNIT.gz &
-          ADM_PIDS+=($!)
+          echo "Collecting ${UNIT} logs for node ${node}"
+          timeout -k 5m 30m bash -c "oc adm node-logs \"${node_log_collection_args:---since=-8h}\" $node -u $UNIT | gzip" > ${NODE_PATH}/${node}_logs_$UNIT.gz &
+          ALL_NODE_PIDS+=($!)
       done
   done
-  wait "${ADM_PIDS[@]}"
+  wait "${ALL_NODE_PIDS[@]}"
 
   oc delete ds perf-node-gather-daemonset -n $NAMESPACE
 }
@@ -194,13 +183,15 @@ resources+=(nodes machineconfigs machineconfigpools featuregates kubeletconfigs 
 
 echo "INFO: Waiting for node performance related collection to complete ..."
 
-# run the collection of resources using must-gather
-for resource in ${resources[@]}; do
-  oc adm inspect ${log_collection_args} --dest-dir must-gather --all-namespaces ${resource}
-done
+# run the collection of resources using must-gather (batched, in background)
+resources_text=$(IFS=, ; echo "${resources[*]}")
+oc adm inspect ${log_collection_args} --dest-dir must-gather --all-namespaces "${resources_text}" &
+inspect_pid=$!
 
-# Collect nodes details
+# Collect nodes details (runs in parallel with the inspect above)
 ppc_nodes
+
+wait $inspect_pid
 
 echo "INFO: Node performance data collection complete."
 

@@ -141,23 +141,23 @@ gather_multus_data
 gather_scale_data
 
 if [[ "${NETWORK_TYPE}" == "ovnkubernetes" ]]; then
-    oc adm inspect ${log_collection_args} --dest-dir must-gather egressips.k8s.ovn.org
-    oc adm inspect ${log_collection_args} --dest-dir must-gather clusteruserdefinednetworks.k8s.ovn.org
-    oc adm inspect ${log_collection_args} --dest-dir must-gather adminnetworkpolicies.policy.networking.k8s.io
-    oc adm inspect ${log_collection_args} --dest-dir must-gather baselineadminnetworkpolicies.policy.networking.k8s.io
+    oc adm inspect ${log_collection_args} --dest-dir must-gather egressips.k8s.ovn.org & PIDS+=($!)
+    oc adm inspect ${log_collection_args} --dest-dir must-gather clusteruserdefinednetworks.k8s.ovn.org & PIDS+=($!)
+    oc adm inspect ${log_collection_args} --dest-dir must-gather adminnetworkpolicies.policy.networking.k8s.io & PIDS+=($!)
+    oc adm inspect ${log_collection_args} --dest-dir must-gather baselineadminnetworkpolicies.policy.networking.k8s.io & PIDS+=($!)
     gather_ovn_kubernetes_data
 elif [[ "${NETWORK_TYPE}" == "openshiftsdn" ]]; then
-    oc adm inspect ${log_collection_args} --dest-dir must-gather hostsubnets.network.openshift.io
+    oc adm inspect ${log_collection_args} --dest-dir must-gather hostsubnets.network.openshift.io & PIDS+=($!)
 fi
 
 CNCC_DEPLOYMENT=$(oc get deployment -n openshift-cloud-network-config-controller --no-headers -o custom-columns=":metadata.name")
 if [[ "${CNCC_DEPLOYMENT}" == "cloud-network-config-controller" ]]; then
-  oc adm inspect ${log_collection_args} --dest-dir must-gather cloudprivateipconfigs.cloud.network.openshift.io
+  oc adm inspect ${log_collection_args} --dest-dir must-gather cloudprivateipconfigs.cloud.network.openshift.io & PIDS+=($!)
 fi
 
 ROUTE_ADVERTISEMENTS=$(oc get network.operator.openshift.io cluster -o=jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.routeAdvertisements}')
 if [[ "${ROUTE_ADVERTISEMENTS}" == "Enabled" ]]; then
-    oc adm inspect ${log_collection_args} --dest-dir must-gather routeadvertisements.k8s.ovn.org
+    oc adm inspect ${log_collection_args} --dest-dir must-gather routeadvertisements.k8s.ovn.org & PIDS+=($!)
 fi
 
 echo "INFO: Waiting for network log collection to complete ..."
