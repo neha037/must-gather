@@ -8,13 +8,13 @@
 # and perf_generate_report in sequence.
 #
 # Environment variables:
-#   MUST_GATHER_PERF        Set to "0" or "false" to disable all perf tracking.
+#   MUST_GATHER_PERF        Set to "true" to enable perf tracking.
 #   PERF_SAMPLE_INTERVAL    Seconds between resource usage samples (default: 5).
 
-# Allow opt-out via MUST_GATHER_PERF=0 or MUST_GATHER_PERF=false
-_PERF_ENABLED=true
-if [[ "${MUST_GATHER_PERF:-}" == "0" || "${MUST_GATHER_PERF:-}" == "false" ]]; then
-    _PERF_ENABLED=false
+# Allow opt-in via MUST_GATHER_PERF=true
+_PERF_ENABLED=false
+if [[ "${MUST_GATHER_PERF:-}" == "true" ]]; then
+    _PERF_ENABLED=true
 fi
 
 # --- Internal state ---
