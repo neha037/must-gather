@@ -73,16 +73,19 @@ pids+=($!)
 perf_track_pid "oc_adm_inspect_named" "$!"
 
 # Parallel resource-existence filter: check all resource types concurrently
+# Sanitize resource names (replace / with _) to avoid path issues in temp files
 filter_tmpdir=$(mktemp -d)
 filter_pids=()
 for gr in "${group_resources[@]}"; do
-  ( oc get "$gr" > /dev/null 2>&1 && echo "$gr" > "$filter_tmpdir/$gr" ) &
+  gr_safe="${gr//\//_}"
+  ( oc get "$gr" > /dev/null 2>&1 && echo "$gr" > "$filter_tmpdir/$gr_safe" ) &
   filter_pids+=($!)
 done
 wait "${filter_pids[@]}"
 filtered_group_resources=()
 for gr in "${group_resources[@]}"; do
-  [[ -f "$filter_tmpdir/$gr" ]] && filtered_group_resources+=("$gr")
+  gr_safe="${gr//\//_}"
+  [[ -f "$filter_tmpdir/$gr_safe" ]] && filtered_group_resources+=("$gr")
 done
 rm -rf "$filter_tmpdir"
 
@@ -94,6 +97,11 @@ rm -rf "$filter_tmpdir"
 # in a subshell (i.e. do not wrap calls in ( ... ) or pipe into it).
 _inspected_resources=()
 inspect_group_parallel() {
+    # Defensive check: fail if called from a subshell
+    if [[ "${BASH_SUBSHELL}" -gt 0 ]]; then
+        echo "ERROR: inspect_group_parallel called from subshell - pids array will not be updated" >&2
+        return 1
+    fi
     local label="$1"
     shift
     local resources=()

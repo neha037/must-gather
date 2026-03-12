@@ -2,53 +2,61 @@
 BASE_COLLECTION_PATH="must-gather"
 CORE_DUMP_PATH=${OUT:-"${BASE_COLLECTION_PATH}/node_core_dumps"}
 
+# DEBUG_POD_SLEEP: How long the debug pod should stay alive (seconds).
+# Must be long enough to complete the oc cp operation. Default 300s (5 min)
+# allows time for large coredump transfers on slow networks.
+DEBUG_POD_SLEEP="${DEBUG_POD_SLEEP:-300}"
+
 mkdir -p "${CORE_DUMP_PATH}"/
 
 function get_dump_off_node {
+    local node="$1"
     local debugPod=""
-    
-    #Get debug pod's name
-    debugPod=$(oc debug --to-namespace="default" node/"$1" -o jsonpath='{.metadata.name}')
 
-    #Start Debug pod force it to stay up until removed in "default" namespace
-    oc debug --to-namespace="default" node/"$1" -- /bin/bash -c 'sleep 300' > /dev/null 2>&1 &
+    # Get debug pod's name
+    debugPod=$(oc debug --to-namespace="default" node/"$node" -o jsonpath='{.metadata.name}')
 
-    #Mimic a normal oc call, i.e pause between two successive calls to allow pod to register
-    sleep 2
-    oc wait -n "default" --for=condition=Ready pod/"$debugPod" --timeout=30s
+    # Start Debug pod, force it to stay up until removed
+    oc debug --to-namespace="default" node/"$node" -- /bin/bash -c "sleep $DEBUG_POD_SLEEP" > /dev/null 2>&1 &
+    local debug_pid=$!
 
-    if [ -z "$debugPod" ]
-    then
-      echo "Debug pod for node ""$1"" never activated"
-    else
-      #Copy Core Dumps out of Nodes suppress Stdout
-      echo "Copying core dumps on node ""$1"""
-      oc cp  --loglevel 1 -n "default" "$debugPod":/host/var/lib/systemd/coredump "${CORE_DUMP_PATH}"/"$1"_core_dump > /dev/null 2>&1 && PIDS+=($!)
-
-      #clean up debug pod after we are done using them  
-      oc delete pod "$debugPod" -n "default"  
+    # Wait for pod to be ready
+    if ! oc wait -n "default" --for=condition=Ready pod/"$debugPod" --timeout=60s 2>/dev/null; then
+      echo "Debug pod for node $node never activated"
+      kill $debug_pid 2>/dev/null || true
+      return 1
     fi
+
+    # Copy Core Dumps
+    echo "Copying core dumps on node $node"
+    oc cp --loglevel 1 -n "default" "$debugPod":/host/var/lib/systemd/coredump "${CORE_DUMP_PATH}/${node}_core_dump" > /dev/null 2>&1
+
+    # Clean up debug pod (don't wait for deletion to complete)
+    oc delete pod "$debugPod" -n "default" --wait=false 2>/dev/null || true
 }
 
 function gather_core_dump_data {
-  #Run coredump pull function on all nodes in parallel
+  local pids=()
+
+  # Run coredump pull function on all nodes in PARALLEL
   for NODE in ${NODES}; do
     get_dump_off_node "${NODE}" &
+    pids+=($!)
   done
+
+  # Wait for ALL nodes to complete
+  echo "INFO: Waiting for node core dump collection to complete ..."
+  wait "${pids[@]}"
+  echo "INFO: Node core dump collection complete."
 }
 
 if [ $# -eq 0 ]; then
     echo "WARNING: Collecting core dumps on ALL linux nodes in your cluster. This could take a long time."
 fi
 
-PIDS=()
 NODES="${*:-$(oc get nodes -o jsonpath='{.items[?(@.status.nodeInfo.operatingSystem=="linux")].metadata.name}')}"
 
 gather_core_dump_data
-
-echo "INFO: Waiting for node core dump collection to complete ..."
-wait "${PIDS[@]}"
-echo "INFO: Node core dump collection to complete."
 
 # force disk flush to ensure that all data gathered is accessible in the copy container
 sync

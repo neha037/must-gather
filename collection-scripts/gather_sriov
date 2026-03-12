@@ -15,10 +15,9 @@ resources+=(ns/${operator_ns})
 # sriovnetwork.openshift.io
 resources+=(sriovnetworknodepolicies sriovnetworknodestates sriovnetworkpoolconfigs sriovnetworks sriovoperatorconfigs sriovibnetworks)
 
-# run the collection of resources using must-gather
-for resource in ${resources[@]}; do
-  oc adm inspect ${log_collection_args} --dest-dir must-gather --all-namespaces ${resource}
-done
+# run the collection of resources using must-gather (batched for performance)
+resources_text=$(IFS=, ; echo "${resources[*]}")
+oc adm inspect ${log_collection_args} --dest-dir must-gather --all-namespaces ${resources_text}
 
 CONFIG_DAEMON_PODS="${@:-$(oc -n ${operator_ns} get pods -l app=sriov-network-config-daemon -o jsonpath='{.items[*].metadata.name}')}"
 PIDS=()
@@ -30,13 +29,29 @@ function gather_netns_ip_a(){
   NETNS_IP_A_LOG_PATH="${CONFIG_DAEMON_POD_LOG_PATH}/netns_ip_a"
 
   # Filter out everything after network namespace name
-  oc exec -n ${operator_ns} ${1} -c sriov-network-config-daemon -- chroot /host /bin/bash -c "ip netns | sed "s/ .*//"" > "${NETNS_LOG_PATH}" 2>&1 
+  oc exec -n ${operator_ns} ${1} -c sriov-network-config-daemon -- chroot /host /bin/bash -c "ip netns | sed 's/ .*//' " > "${NETNS_LOG_PATH}" 2>&1
 
-  while IFS= read -r id; do  
-    echo "> ip netns exec ${id} ip a" >> "${NETNS_IP_A_LOG_PATH}" &&
-    oc exec -n ${operator_ns} "${1}" -c sriov-network-config-daemon -- chroot /host \
-    /bin/bash -c "ip netns exec ${id} ip a" >> "${NETNS_IP_A_LOG_PATH}" 2>&1
+  # Parallel execution with temp files to preserve order
+  local tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+  local pids=()
+  local idx=0
+
+  while IFS= read -r id; do
+    (
+      echo "> ip netns exec ${id} ip a"
+      oc exec -n ${operator_ns} "${1}" -c sriov-network-config-daemon -- chroot /host \
+        /bin/bash -c "ip netns exec ${id} ip a" 2>&1
+    ) > "${tmpdir}/$(printf '%04d' $idx)_${id}" &
+    pids+=($!)
+    ((idx++))
   done < "${NETNS_LOG_PATH}"
+
+  wait "${pids[@]}"
+
+  # Combine in original order (sorted by index prefix)
+  cat "${tmpdir}"/* > "${NETNS_IP_A_LOG_PATH}" 2>/dev/null || true
+  # tmpdir cleanup handled by RETURN trap
 }
 
 function gather_ethtool(){
@@ -50,15 +65,30 @@ function gather_ethtool(){
   # Cut long interfaces names.
   INTERFACES="$(echo "$OUT" | awk -F': ' '{print $2}')"
 
+  # Parallel execution with temp files to preserve order
+  local tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+  local pids=()
+  local idx=0
+
   # Run ethtool for each interface except for lo.
   while IFS= read -r interface; do
     if [ -z "$interface" ] || [ "$interface" = "lo" ] || [[ "$interface" == *"@"* ]]; then
       continue
     fi
-    echo "> ethtool -i ${interface}" >> "${ETHTOOL_LOG_PATH}"
-    oc exec -n ${operator_ns} ${1} -c sriov-network-config-daemon -- chroot /host \
-    /bin/bash -c "ethtool -i ${interface}" >> "${ETHTOOL_LOG_PATH}"
+    (
+      echo "> ethtool -i ${interface}"
+      oc exec -n ${operator_ns} ${1} -c sriov-network-config-daemon -- chroot /host \
+        /bin/bash -c "ethtool -i ${interface}" 2>&1
+    ) > "${tmpdir}/$(printf '%04d' $idx)_${interface}" &
+    pids+=($!)
+    ((idx++))
   done <<< "$INTERFACES"
+
+  wait "${pids[@]}"
+
+  cat "${tmpdir}"/* > "${ETHTOOL_LOG_PATH}" 2>/dev/null || true
+  # tmpdir cleanup handled by RETURN trap
 }
 
 function gather_bf_info(){
@@ -71,13 +101,29 @@ function gather_bf_info(){
     echo "No Mellanox devices detected by mstconfig" | tee -a "${MSTCONFIG_LOG_PATH}" "${MSTFLINT_LOG_PATH}" >/dev/null;
     return
   fi
+
+  local tmpdir_config=$(mktemp -d)
+  local tmpdir_flint=$(mktemp -d)
+  trap "rm -rf '$tmpdir_config' '$tmpdir_flint'" RETURN
+  local pids=()
+  local idx=0
+
   for device in $devices; do
     oc exec -n ${operator_ns} ${1} -c sriov-network-config-daemon -- \
-    /bin/bash -c "mstconfig -e -d $device q" >> "${MSTCONFIG_LOG_PATH}"
+      /bin/bash -c "mstconfig -e -d $device q" > "${tmpdir_config}/$(printf '%04d' $idx)_${device}" 2>&1 &
+    pids+=($!)
 
     oc exec -n ${operator_ns} ${1} -c sriov-network-config-daemon -- \
-    /bin/bash -c "mstflint -d $device q" >> "${MSTFLINT_LOG_PATH}"
+      /bin/bash -c "mstflint -d $device q" > "${tmpdir_flint}/$(printf '%04d' $idx)_${device}" 2>&1 &
+    pids+=($!)
+    ((idx++))
   done
+
+  wait "${pids[@]}"
+
+  cat "${tmpdir_config}"/* >> "${MSTCONFIG_LOG_PATH}" 2>/dev/null || true
+  cat "${tmpdir_flint}"/* >> "${MSTFLINT_LOG_PATH}" 2>/dev/null || true
+  # tmpdir cleanup handled by RETURN trap
 }
 
 for CONFIG_DAEMON_POD in ${CONFIG_DAEMON_PODS[@]}; do

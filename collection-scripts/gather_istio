@@ -15,6 +15,7 @@
 
 source $(dirname "$0")/common.sh
 BASE_COLLECTION_PATH="/must-gather/istio"
+PIDS=()
 
 # Get Istio, sail operator, kiali, gateway.networking.k8s.io, inference.networking.x-k8s.io and inference.networking.k8s.io group CRDs
 function getCRDs() {
@@ -69,18 +70,30 @@ function getEnvoyConfigForPodsInNamespace() {
 
   local pods
   pods="$(oc get pods -n "${podNamespace}" -o jsonpath='{ .items[*].metadata.name }')"
+
+  local local_pids=()
   for podName in ${pods}; do
-    if oc get pod -o yaml "${podName}" -n "${podNamespace}" | grep -q proxyv2; then
+    # Check if pod has istio proxy (quick check)
+    if oc get pod -o yaml "${podName}" -n "${podNamespace}" 2>/dev/null | grep -q proxyv2; then
       echo "Collecting config_dump and stats for pod ${podName}.${podNamespace}"
 
       local logPath=${BASE_COLLECTION_PATH}/namespaces/${podNamespace}/pods/${podName}
       mkdir -p "${logPath}"
 
-      oc exec "${istiodName}" -n "${controlPlaneNamespace}" -c discovery -- bash -c "/usr/local/bin/pilot-discovery request GET /debug/config_dump?proxyID=${podName}.${podNamespace}" > "${logPath}/config_dump_istiod.json" 2>&1
-      oc exec -n "${podNamespace}" "${podName}" -c istio-proxy -- /usr/local/bin/pilot-agent request GET config_dump > "${logPath}/config_dump_proxy.json" 2>&1
-      oc exec -n "${podNamespace}" "${podName}" -c istio-proxy -- /usr/local/bin/pilot-agent request GET stats > "${logPath}/proxy_stats" 2>&1
+      # Parallelize the 3 oc exec calls per pod
+      oc exec "${istiodName}" -n "${controlPlaneNamespace}" -c discovery -- bash -c "/usr/local/bin/pilot-discovery request GET /debug/config_dump?proxyID=${podName}.${podNamespace}" > "${logPath}/config_dump_istiod.json" 2>&1 &
+      local_pids+=($!)
+
+      oc exec -n "${podNamespace}" "${podName}" -c istio-proxy -- /usr/local/bin/pilot-agent request GET config_dump > "${logPath}/config_dump_proxy.json" 2>&1 &
+      local_pids+=($!)
+
+      oc exec -n "${podNamespace}" "${podName}" -c istio-proxy -- /usr/local/bin/pilot-agent request GET stats > "${logPath}/proxy_stats" 2>&1 &
+      local_pids+=($!)
     fi
   done
+
+  # Wait for all pod data collection to complete
+  wait "${local_pids[@]}"
 }
 
 # Inspect given resource in given namespace (optional)
@@ -155,10 +168,17 @@ function main() {
   # inspect all istio, sail operator, kiali and gateway API+ CRDs
   # this will also collect instances of those CRDs
   crds="$(getCRDs)"
-  for crd in ${crds}; do
-    inspect "crd/${crd}"
-    oc adm inspect ${log_collection_args} --dest-dir "${BASE_COLLECTION_PATH}" "${crd}" --all-namespaces
-  done
+  if [ -n "$crds" ]; then
+    # Batch all CRD resource inspects into one call
+    crd_list=$(echo "$crds" | tr ' ' ',')
+    oc adm inspect ${log_collection_args} --dest-dir "${BASE_COLLECTION_PATH}" "${crd_list}" --all-namespaces &
+    PIDS+=($!)
+
+    # Batch CRD definition inspects
+    crd_defs=$(echo "$crds" | sed 's/[^ ]*/crd\/&/g' | tr ' ' ',')
+    oc adm inspect ${log_collection_args} --dest-dir "${BASE_COLLECTION_PATH}" "${crd_defs}" &
+    PIDS+=($!)
+  fi
 
   # inspect all controlled mutatingwebhookconfiguration
   for mwc in $(oc get mutatingwebhookconfiguration -l app=sidecar-injector -o name);do
@@ -221,7 +241,9 @@ function main() {
     done
   fi
 
-echo "Done executing Istio gather script"
+  echo "INFO: Waiting for Istio data collection to complete..."
+  wait "${PIDS[@]}"
+  echo "Done executing Istio gather script"
 }
 
 main "$@"
