@@ -10,6 +10,7 @@
 # Environment variables:
 #   MUST_GATHER_PERF        Set to "true" to enable perf tracking.
 #   PERF_SAMPLE_INTERVAL    Seconds between resource usage samples (default: 5).
+#   PERF_TRACK_PID_INTERVAL Seconds between PID polling checks (default: 1).
 
 # Allow opt-in via MUST_GATHER_PERF=true
 _PERF_ENABLED=false
@@ -182,6 +183,7 @@ perf_track_script() {
 # target PID exits. This avoids wrapping the original command, keeping
 # complex invocations (e.g. oc adm inspect) untouched.
 # Note: exit code is not available via this method (recorded as "-").
+# The polling interval can be configured via PERF_TRACK_PID_INTERVAL (default: 1s).
 # Usage:
 #   some_command --with-many-args &
 #   pids+=($!)
@@ -191,13 +193,14 @@ perf_track_pid() {
 
     local label="$1"
     local pid="$2"
+    local poll_interval="${PERF_TRACK_PID_INTERVAL:-1}"
     local start_time
     start_time=$(date +%s)
     echo "${label},${start_time}" >> "$PERF_DATA_DIR/started.csv"
 
     (
         while kill -0 "$pid" 2>/dev/null; do
-            sleep 1
+            sleep "$poll_interval"
         done
         local end_time
         end_time=$(date +%s)

@@ -8,8 +8,10 @@ load test_helper
 # =============================================================================
 
 # Runs a bash snippet with perf_utils.sh sourced and strict mode disabled.
+# Sets MUST_GATHER_PERF=true to enable performance tracking (opt-in).
 run_perf() {
 	run bash -c "
+		export MUST_GATHER_PERF=true
 		export BASE_COLLECTION_PATH=\"$TEST_TMPDIR/must-gather\"
 		set +o nounset
 		set +o errexit
@@ -556,6 +558,7 @@ run_perf() {
 	cat > "$wrapper" <<'SCRIPT'
 #!/bin/bash
 set +o nounset; set +o errexit; set +o pipefail
+export MUST_GATHER_PERF=true
 export BASE_COLLECTION_PATH="__BASE__"
 source "__SCRIPT_DIR__/perf_utils.sh"
 perf_init
@@ -651,6 +654,52 @@ SCRIPT
 	assert_output --partial "--- Scripts Still Running at Interruption ---"
 	assert_output --partial "stuck_cmd"
 	assert_output --partial "running for"
+}
+
+# =============================================================================
+# Error handling tests
+# =============================================================================
+
+@test "perf_init handles non-writable TMPDIR gracefully" {
+	# Create a non-writable directory to use as TMPDIR
+	local readonly_dir="$TEST_TMPDIR/readonly_tmpdir"
+	mkdir -p "$readonly_dir"
+	chmod 000 "$readonly_dir"
+
+	run bash -c "
+		export MUST_GATHER_PERF=true
+		export TMPDIR='$readonly_dir'
+		export BASE_COLLECTION_PATH=\"$TEST_TMPDIR/must-gather\"
+		set +o nounset
+		set +o errexit
+		set +o pipefail
+		source \"$SCRIPT_DIR/perf_utils.sh\"
+		perf_init 2>&1
+		echo \"EXIT_CODE=\$?\"
+	"
+
+	# Restore permissions for cleanup
+	chmod 755 "$readonly_dir"
+
+	# The command should fail (non-zero exit or error message)
+	# mktemp will fail when TMPDIR is not writable
+	assert_output --regexp "(EXIT_CODE=[1-9]|cannot create|Permission denied|mktemp)"
+}
+
+@test "perf_track_pid respects PERF_TRACK_PID_INTERVAL" {
+	run_perf '
+		export PERF_TRACK_PID_INTERVAL=2
+		perf_init
+		sleep 3 &
+		bg_pid=$!
+		perf_track_pid "interval_test" $bg_pid
+		wait $bg_pid 2>/dev/null || true
+		sleep 3
+		echo "CSV=$(cat "$PERF_DATA_DIR/scripts.csv")"
+	'
+
+	assert_success
+	assert_output --partial "interval_test,"
 }
 
 # =============================================================================
