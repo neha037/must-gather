@@ -48,7 +48,7 @@ group_resources+=(certificatesigningrequests)
 group_resources+=(nodes)
 
 # Namespaces/Project Resources
-named_resources+=(ns/default ns/openshift ns/kube-system ns/openshift-etcd)
+named_resources+=(ns/default ns/openshift)
 
 # Storage Resources
 group_resources+=(storageclasses persistentvolumes volumeattachments csidrivers csinodes volumesnapshotclasses volumesnapshotcontents volumegroupsnapshotclasses volumegroupsnapshotcontents clustercsidrivers volumeattributesclasses)
@@ -101,91 +101,13 @@ for gr in "${group_resources[@]}"; do
 done
 rm -rf "$filter_tmpdir"
 
-# Launch an oc adm inspect for a subset of filtered group resources.
-# Skips resources not confirmed to exist on the cluster.
-#
-# NOTE: This function intentionally modifies the caller's `pids` array and
-# calls `perf_track_pid` from the caller's scope. It must NOT be executed
-# in a subshell (i.e. do not wrap calls in ( ... ) or pipe into it).
-_inspected_resources=()
-inspect_group_parallel() {
-    # Defensive check: fail if called from a subshell
-    if [[ "${BASH_SUBSHELL}" -gt 0 ]]; then
-        echo "ERROR: inspect_group_parallel called from subshell - pids array will not be updated" >&2
-        return 1
-    fi
-    local label="$1"
-    shift
-    local resources=()
-    for r in "$@"; do
-        for fr in "${filtered_group_resources[@]}"; do
-            if [[ "$r" == "$fr" ]]; then
-                resources+=("$r")
-                break
-            fi
-        done
-    done
-    _inspected_resources+=("$@")
-    if [[ ${#resources[@]} -eq 0 ]]; then
-        return
-    fi
-    local resources_text
-    resources_text=$(IFS=, ; echo "${resources[*]}")
-    oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${resources_text}" &
+# Collect all filtered group resources in a single oc adm inspect call
+if [[ ${#filtered_group_resources[@]} -gt 0 ]]; then
+    group_resources_text=$(IFS=, ; echo "${filtered_group_resources[*]}")
+    oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${group_resources_text}" &
     pids+=($!)
-    perf_track_pid "$label" "$!"
-}
-
-# Split group resources into parallel oc adm inspect calls by weight category.
-# Nodes are isolated because they dominate collection time on large clusters.
-# Storage resources are grouped together as a mid-weight batch.
-# Certs and operators form lighter groups that can finish independently.
-#
-# IMPORTANT: Every entry in group_resources must appear in exactly one of the
-# inspect_group_parallel calls below. The catch-all check after these calls
-# will error if any resource is missed.
-inspect_group_parallel "oc_adm_inspect_group_nodes" \
-    nodes
-
-inspect_group_parallel "oc_adm_inspect_group_storage" \
-    storageclasses persistentvolumes volumeattachments \
-    csidrivers csinodes volumesnapshotclasses volumesnapshotcontents \
-    volumegroupsnapshotclasses volumegroupsnapshotcontents \
-    clustercsidrivers volumeattributesclasses
-
-inspect_group_parallel "oc_adm_inspect_group_certs" \
-    certificatesigningrequests \
-    clusterresourcequotas.quota.openshift.io
-
-inspect_group_parallel "oc_adm_inspect_group_operators" \
-    clusterversion clusteroperators apiservices \
-    imagecontentsourcepolicies.operator.openshift.io \
-    networks.operator.openshift.io \
-    prioritylevelconfigurations.flowcontrol.apiserver.k8s.io \
-    flowschemas.flowcontrol.apiserver.k8s.io
-
-# Catch-all: verify every group_resource was passed to an inspect_group_parallel
-# call. Any resource added to group_resources but not assigned to a parallel
-# group would be silently dropped without this guard.
-_missed_resources=()
-for gr in "${group_resources[@]}"; do
-    local_found=false
-    for ir in "${_inspected_resources[@]}"; do
-        if [[ "$gr" == "$ir" ]]; then
-            local_found=true
-            break
-        fi
-    done
-    if [[ "$local_found" != "true" ]]; then
-        _missed_resources+=("$gr")
-    fi
-done
-if [[ ${#_missed_resources[@]} -gt 0 ]]; then
-    echo "WARNING: group_resources not assigned to any inspect_group_parallel call: ${_missed_resources[*]}" >&2
-    # Collect the missed resources in a fallback group so nothing is lost
-    inspect_group_parallel "oc_adm_inspect_group_uncategorised" "${_missed_resources[@]}"
+    perf_track_pid "oc_adm_inspect_group" "$!"
 fi
-unset _inspected_resources _missed_resources
 
 all_ns_resources_text=$(IFS=, ; echo "${all_ns_resources[*]}")
 oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${all_ns_resources_text}" --all-namespaces &
