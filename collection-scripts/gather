@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# Parse command-line arguments
+for arg in "$@"; do
+    case "$arg" in
+        --perf)
+            export MUST_GATHER_PERF=true
+            ;;
+    esac
+done
+
 # generate /must-gather/version file
 . version
 echo "openshift/must-gather"> /must-gather/version
