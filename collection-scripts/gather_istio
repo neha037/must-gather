@@ -93,7 +93,7 @@ function getEnvoyConfigForPodsInNamespace() {
   done
 
   # Wait for all pod data collection to complete
-  wait "${local_pids[@]}"
+  [[ ${#local_pids[@]} -gt 0 ]] && wait "${local_pids[@]}"
 }
 
 # Inspect given resource in given namespace (optional)

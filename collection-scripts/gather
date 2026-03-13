@@ -74,6 +74,9 @@ perf_track_pid "oc_adm_inspect_named" "$!"
 
 # Parallel resource-existence filter: check all resource types concurrently
 # Sanitize resource names (replace / with _) to avoid path issues in temp files
+# NOTE: No EXIT trap here to avoid overwriting the perf_utils cleanup trap.
+# The tmpdir is cleaned up immediately after use below, and the container is
+# ephemeral, so a small leak on unexpected termination is acceptable.
 filter_tmpdir=$(mktemp -d)
 filter_pids=()
 for gr in "${group_resources[@]}"; do

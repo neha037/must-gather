@@ -2,6 +2,11 @@
 BASE_COLLECTION_PATH="must-gather"
 CORE_DUMP_PATH=${OUT:-"${BASE_COLLECTION_PATH}/node_core_dumps"}
 
+# NOTE: Debug pods are created in the "default" namespace. This is intentional
+# as debug pods need a namespace without restrictive PodSecurityPolicies or
+# SecurityContextConstraints. If your cluster restricts workloads in "default",
+# this script may need adjustment.
+
 # DEBUG_POD_SLEEP: How long the debug pod should stay alive (seconds).
 # Must be long enough to complete the oc cp operation. Default 300s (5 min)
 # allows time for large coredump transfers on slow networks.
