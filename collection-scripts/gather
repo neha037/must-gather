@@ -101,12 +101,49 @@ for gr in "${group_resources[@]}"; do
 done
 rm -rf "$filter_tmpdir"
 
-# Collect all filtered group resources in a single oc adm inspect call
-if [[ ${#filtered_group_resources[@]} -gt 0 ]]; then
-    group_resources_text=$(IFS=, ; echo "${filtered_group_resources[*]}")
-    oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${group_resources_text}" &
+# Split group resources into parallel buckets for faster collection.
+# clusteroperators is by far the heaviest — it follows references to all operator
+# namespaces and collects their pod logs. We split individual clusteroperators into
+# parallel batches to reduce wall-clock time.
+group_other=()
+has_clusteroperators=false
+
+for gr in "${filtered_group_resources[@]}"; do
+  case "$gr" in
+    clusteroperators)
+      has_clusteroperators=true ;;
+    *)
+      group_other+=("$gr") ;;
+  esac
+done
+
+# Inspect clusteroperators in parallel batches
+if [[ "$has_clusteroperators" == true ]]; then
+    CO_PARALLEL_BATCHES=${CO_PARALLEL_BATCHES:-3}
+    co_names=($(oc get clusteroperators -o jsonpath='{.items[*].metadata.name}'))
+    total=${#co_names[@]}
+
+    if [[ $total -gt 0 ]]; then
+        batch_size=$(( (total + CO_PARALLEL_BATCHES - 1) / CO_PARALLEL_BATCHES ))
+        for ((i=0; i<total; i+=batch_size)); do
+            batch=("${co_names[@]:i:batch_size}")
+            co_args=()
+            for co in "${batch[@]}"; do
+                co_args+=("clusteroperator/$co")
+            done
+            oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${co_args[@]}" &
+            pids+=($!)
+            perf_track_pid "inspect_co[${batch[0]}..${batch[-1]}]" "$!"
+        done
+    fi
+fi
+
+# Inspect all other group resources together
+if [[ ${#group_other[@]} -gt 0 ]]; then
+    other_text=$(IFS=, ; echo "${group_other[*]}")
+    oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${other_text}" &
     pids+=($!)
-    perf_track_pid "oc_adm_inspect_group" "$!"
+    perf_track_pid "oc_adm_inspect_group_other" "$!"
 fi
 
 all_ns_resources_text=$(IFS=, ; echo "${all_ns_resources[*]}")
