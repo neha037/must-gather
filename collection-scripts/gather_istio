@@ -175,8 +175,11 @@ function main() {
     PIDS+=($!)
 
     # Batch CRD definition inspects
-    crd_defs=$(echo "$crds" | sed 's/[^ ]*/crd\/&/g' | tr ' ' ',')
-    oc adm inspect ${log_collection_args} --dest-dir "${BASE_COLLECTION_PATH}" "${crd_defs}" &
+    crd_defs=()
+    for crd in ${crds}; do
+      crd_defs+=("crd/${crd}")
+    done
+    oc adm inspect ${log_collection_args} --dest-dir "${BASE_COLLECTION_PATH}" "${crd_defs[@]}" &
     PIDS+=($!)
   fi
 
