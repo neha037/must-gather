@@ -1,12 +1,26 @@
 #!/bin/bash
 
+# Parse command-line arguments
+for arg in "$@"; do
+    case "$arg" in
+        --perf)
+            export MUST_GATHER_PERF=true
+            ;;
+    esac
+done
+
 # generate /must-gather/version file
 . version
 echo "openshift/must-gather" >/must-gather/version
 version >>/must-gather/version
 
 source $(dirname "$0")/common.sh
+source $(dirname "$0")/perf_utils.sh
 get_log_collection_args
+
+# Initialise performance tracking
+perf_init
+perf_start_monitor
 
 # Store PIDs of all the subprocesses
 pids=()
@@ -65,6 +79,7 @@ group_resources+=(clusterresourcequotas.quota.openshift.io)
 # running across all-namespaces for the few "Autoscaler" resources.
 oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${named_resources[@]}" &
 pids+=($!)
+perf_track_pid "oc_adm_inspect_named" "$!"
 
 filtered_group_resources=()
 for gr in "${group_resources[@]}"; do
@@ -79,6 +94,7 @@ group_resources_text=$(
 )
 oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${group_resources_text}" &
 pids+=($!)
+perf_track_pid "oc_adm_inspect_group" "$!"
 
 all_ns_resources_text=$(
 	IFS=,
@@ -86,61 +102,62 @@ all_ns_resources_text=$(
 )
 oc adm inspect ${log_collection_args} --dest-dir must-gather --rotated-pod-logs "${all_ns_resources_text}" --all-namespaces &
 pids+=($!)
+perf_track_pid "oc_adm_inspect_all_ns" "$!"
 
 # Gather Insights Operator Archives
-/usr/bin/gather_insights &
+perf_track_script "gather_insights" /usr/bin/gather_insights &
 pids+=($!)
 
 # Gather monitoring data from the cluster
-/usr/bin/gather_monitoring &
+perf_track_script "gather_monitoring" /usr/bin/gather_monitoring &
 pids+=($!)
 
 # Gather optional operator resources from all namespaces
-/usr/bin/gather_olm &
+perf_track_script "gather_olm" /usr/bin/gather_olm &
 pids+=($!)
 
 # Gather OLM v1 resources
-/usr/bin/gather_olm_v1 &
+perf_track_script "gather_olm_v1" /usr/bin/gather_olm_v1 &
 pids+=($!)
 
 # Gather API Priority and Fairness Endpoints
-/usr/bin/gather_priority_and_fairness &
+perf_track_script "gather_priority_and_fairness" /usr/bin/gather_priority_and_fairness &
 pids+=($!)
 
 # Gather etcd information
-/usr/bin/gather_etcd &
+perf_track_script "gather_etcd" /usr/bin/gather_etcd &
 pids+=($!)
 
 # Gather Service Logs (using a supplemental Script); Scoped to Masters.
-/usr/bin/gather_service_logs master &
+perf_track_script "gather_service_logs" /usr/bin/gather_service_logs master &
 pids+=($!)
 
 # Gather Windows Kubernetes component logs
-/usr/bin/gather_windows_node_logs &
+perf_track_script "gather_windows_node_logs" /usr/bin/gather_windows_node_logs &
 pids+=($!)
 
 # Gather HAProxy config files
-/usr/bin/gather_haproxy_config &
+perf_track_script "gather_haproxy_config" /usr/bin/gather_haproxy_config &
 pids+=($!)
 
 # Gather kas startup and termination logs
-/usr/bin/gather_kas_startup_termination_logs &
+perf_track_script "gather_kas_startup_termination_logs" /usr/bin/gather_kas_startup_termination_logs &
 pids+=($!)
 
 # Gather network logs
-/usr/bin/gather_network_logs_basics &
+perf_track_script "gather_network_logs_basics" /usr/bin/gather_network_logs_basics &
 pids+=($!)
 
 # Gather metallb logs
-/usr/bin/gather_metallb &
+perf_track_script "gather_metallb" /usr/bin/gather_metallb &
 pids+=($!)
 
 # Gather frr-k8s logs
-/usr/bin/gather_frrk8s &
+perf_track_script "gather_frrk8s" /usr/bin/gather_frrk8s &
 pids+=($!)
 
 # Gather NMState
-/usr/bin/gather_nmstate &
+perf_track_script "gather_nmstate" /usr/bin/gather_nmstate &
 pids+=($!)
 
 # Gather Node Feature Discovery (NFD)
@@ -148,35 +165,35 @@ pids+=($!)
 pids+=($!)
 
 # Gather SR-IOV resources
-/usr/bin/gather_sriov &
+perf_track_script "gather_sriov" /usr/bin/gather_sriov &
 pids+=($!)
 
 # Gather PodNetworkConnectivityCheck
-/usr/bin/gather_podnetworkconnectivitycheck &
+perf_track_script "gather_podnetworkconnectivitycheck" /usr/bin/gather_podnetworkconnectivitycheck &
 pids+=($!)
 
 # Gather On-Disk MachineConfig files
-/usr/bin/gather_machineconfig_ondisk &
+perf_track_script "gather_machineconfig_ondisk" /usr/bin/gather_machineconfig_ondisk &
 pids+=($!)
 
 # Gather On-Disk MachineConfigDaemon logs
-/usr/bin/gather_machineconfigdaemon_termination_logs &
+perf_track_script "gather_machineconfigdaemon_termination_logs" /usr/bin/gather_machineconfigdaemon_termination_logs &
 pids+=($!)
 
 # Gather vSphere resources. This is NOOP on non-vSphere platform.
-/usr/bin/gather_vsphere &
+perf_track_script "gather_vsphere" /usr/bin/gather_vsphere &
 pids+=($!)
 
 # Gather Performance profile information
-/usr/bin/gather_ppc &
+perf_track_script "gather_ppc" /usr/bin/gather_ppc &
 pids+=($!)
 
 # Gather OSUS information
-/usr/bin/gather_osus &
+perf_track_script "gather_osus" /usr/bin/gather_osus &
 pids+=($!)
 
 # Gather Istio/Gateway API information
-/usr/bin/gather_istio &
+perf_track_script "gather_istio" /usr/bin/gather_istio &
 pids+=($!)
 
 # Check if PID array has any values, if so, wait for them to finish
@@ -186,7 +203,11 @@ if [ ${#pids[@]} -ne 0 ]; then
 fi
 
 # Gather ARO information
-/usr/bin/gather_aro
+perf_track_script "gather_aro" /usr/bin/gather_aro
+
+# Stop resource monitor and generate the performance report
+perf_stop_monitor
+perf_generate_report
 
 # force disk flush to ensure that all data gathered is accessible in the copy container
 sync
